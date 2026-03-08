@@ -1,0 +1,25 @@
+# Shopify App Configuration
+# Learn more: https://shopify.dev/docs/apps/tools/cli/configuration
+
+name = "RegShield"
+client_id = ""
+application_url = "https://localhost:3000"
+embedded = true
+
+[access_scopes]
+scopes = "read_products,write_products"
+
+[auth]
+redirect_urls = ["https://localhost:3000/auth/callback"]
+
+[webhooks]
+api_version = "2024-10"
+
+  [webhooks.subscriptions]
+
+    [[webhooks.subscriptions.topics]]
+    topics = ["products/create", "products/update", "app/uninstalled"]
+    uri = "/webhooks"
+
+[pos]
+embedded = false
