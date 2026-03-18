@@ -1,4 +1,4 @@
-import { json } from "@remix-run/node";
+import { json, type LoaderFunctionArgs, type ActionFunctionArgs } from "@remix-run/node";
 import { useLoaderData, useNavigate, useSubmit } from "@remix-run/react";
 import {
   BlockStack,
@@ -9,46 +9,71 @@ import {
   Page,
   Text,
 } from "@shopify/polaris";
+import { authenticate } from "~/lib/shopify.server";
+import { db } from "~/lib/db.server";
+import { getShopByDomain } from "~/services/db/scan-writer";
 import { DashboardStats } from "~/components/DashboardStats";
-import type { ComplianceScore } from "~/lib/types";
 
-interface DashboardData {
-  totalProducts: number;
-  compliant: number;
-  warnings: number;
-  violations: number;
-  notScanned: number;
-  recentFindings: Array<{
-    productTitle: string;
-    severity: string;
-    title: string;
-    createdAt: string;
-  }>;
+export async function loader({ request }: LoaderFunctionArgs) {
+  const { session } = await authenticate.admin(request);
+  const shop = await getShopByDomain(session.shop);
+
+  if (!shop) {
+    return json({
+      totalProducts: 0,
+      compliant: 0,
+      warnings: 0,
+      violations: 0,
+      notScanned: 0,
+      recentFindings: [],
+    });
+  }
+
+  // Count products by compliance score
+  const [green, yellow, red, notScanned] = await Promise.all([
+    db.product.count({ where: { shopId: shop.id, complianceScore: "GREEN" } }),
+    db.product.count({ where: { shopId: shop.id, complianceScore: "YELLOW" } }),
+    db.product.count({ where: { shopId: shop.id, complianceScore: "RED" } }),
+    db.product.count({ where: { shopId: shop.id, complianceScore: "NOT_SCANNED" } }),
+  ]);
+
+  const totalProducts = green + yellow + red + notScanned;
+
+  // Get 10 most recent critical findings
+  const recentCritical = await db.finding.findMany({
+    where: {
+      product: { shopId: shop.id },
+      severity: "critical",
+      resolved: false,
+    },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+    include: { product: { select: { title: true } } },
+  });
+
+  return json({
+    totalProducts,
+    compliant: green,
+    warnings: yellow,
+    violations: red,
+    notScanned,
+    recentFindings: recentCritical.map((f) => ({
+      productTitle: f.product.title,
+      severity: f.severity,
+      title: f.title,
+      createdAt: f.createdAt.toISOString(),
+    })),
+  });
 }
 
-export async function loader() {
-  // In production, this would query the database
-  // For now, return placeholder data
-  const data: DashboardData = {
-    totalProducts: 0,
-    compliant: 0,
-    warnings: 0,
-    violations: 0,
-    notScanned: 0,
-    recentFindings: [],
-  };
-
-  return json(data);
-}
-
-export async function action() {
-  // Handle "Scan All Products" action
-  // In production: trigger bulk scan job
-  return json({ success: true });
+export async function action({ request }: ActionFunctionArgs) {
+  const { session } = await authenticate.admin(request);
+  // Redirect to scan page for bulk scan
+  return json({ success: true, redirect: "/app/scan" });
 }
 
 export default function Dashboard() {
-  const data = useLoaderData<DashboardData>();
+  const data = useLoaderData<typeof loader>();
   const navigate = useNavigate();
   const submit = useSubmit();
 
@@ -76,7 +101,7 @@ export default function Dashboard() {
                 <InlineStack gap="300">
                   <Button
                     variant="primary"
-                    onClick={() => submit({}, { method: "post" })}
+                    onClick={() => navigate("/app/scan")}
                   >
                     Scan All Products
                   </Button>
@@ -95,33 +120,24 @@ export default function Dashboard() {
             <Card>
               <BlockStack gap="400">
                 <Text as="h2" variant="headingMd">
-                  Recent Issues
+                  Recent Critical Issues
                 </Text>
                 {data.recentFindings.length === 0 ? (
                   <Text as="p" variant="bodyMd" tone="subdued">
-                    No recent findings. Run a scan to check your products.
+                    {data.totalProducts === 0
+                      ? "No products scanned yet. Run a scan to check compliance."
+                      : "No critical issues found."}
                   </Text>
                 ) : (
                   <BlockStack gap="200">
                     {data.recentFindings.map((finding, i) => (
-                      <InlineStack key={i} gap="200" blockAlign="center">
-                        <Text
-                          as="span"
-                          variant="bodySm"
-                          tone={
-                            finding.severity === "critical"
-                              ? "critical"
-                              : finding.severity === "warning"
-                                ? "caution"
-                                : "subdued"
-                          }
-                        >
-                          {finding.severity.toUpperCase()}
+                      <Text key={i} as="p" variant="bodySm">
+                        <Text as="span" tone="critical" fontWeight="semibold">
+                          {finding.productTitle}
                         </Text>
-                        <Text as="span" variant="bodySm">
-                          {finding.productTitle}: {finding.title}
-                        </Text>
-                      </InlineStack>
+                        {": "}
+                        {finding.title}
+                      </Text>
                     ))}
                   </BlockStack>
                 )}
@@ -134,9 +150,6 @@ export default function Dashboard() {
           <BlockStack gap="300">
             <Text as="h2" variant="headingMd">
               Monitored Categories
-            </Text>
-            <Text as="p" variant="bodyMd">
-              RegShield monitors your products across 5 regulatory categories:
             </Text>
             <BlockStack gap="100">
               <Text as="p" variant="bodyMd">

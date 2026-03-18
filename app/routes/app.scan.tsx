@@ -1,5 +1,5 @@
-import { json, type ActionFunctionArgs } from "@remix-run/node";
-import { useSubmit, useActionData } from "@remix-run/react";
+import { json, type ActionFunctionArgs, type LoaderFunctionArgs } from "@remix-run/node";
+import { useLoaderData, useSubmit, useActionData, useNavigation } from "@remix-run/react";
 import {
   BlockStack,
   Banner,
@@ -7,32 +7,147 @@ import {
   Card,
   Page,
   Text,
+  ProgressBar,
 } from "@shopify/polaris";
-import type { ProductData, ShopSettings } from "~/lib/types";
+import { authenticate } from "~/lib/shopify.server";
+import { db } from "~/lib/db.server";
+import { getShopByDomain, saveScanResult, upsertProduct } from "~/services/db/scan-writer";
+import { fetchAllProducts, generateContentHash } from "~/services/shopify/products";
+import { scanProduct } from "~/services/compliance/engine";
 import { DEFAULT_SHOP_SETTINGS } from "~/lib/types";
-import { scanProduct, getScanSummary } from "~/services/compliance/engine";
 
-export async function action({ request }: ActionFunctionArgs) {
-  const formData = await request.formData();
-  const scanType = formData.get("scanType") as string || "bulk";
-  const productId = formData.get("productId") as string | null;
+export async function loader({ request }: LoaderFunctionArgs) {
+  const { session } = await authenticate.admin(request);
+  const shop = await getShopByDomain(session.shop);
 
-  // In production:
-  // 1. Fetch products from Shopify via admin API
-  // 2. Run scan pipeline on each
-  // 3. Save results to DB
-  // 4. Return summary
+  const lastScan = shop
+    ? await db.scan.findFirst({
+        where: { shopId: shop.id, productId: null },
+        orderBy: { startedAt: "desc" },
+      })
+    : null;
 
   return json({
-    success: true,
-    scanType,
-    message: "Scan initiated. Results will appear on the Products page.",
+    lastScan: lastScan
+      ? {
+          startedAt: lastScan.startedAt.toISOString(),
+          completedAt: lastScan.completedAt?.toISOString() ?? null,
+          totalProducts: lastScan.totalProducts,
+          criticalCount: lastScan.criticalCount,
+          warningCount: lastScan.warningCount,
+        }
+      : null,
   });
 }
 
+export async function action({ request }: ActionFunctionArgs) {
+  const { session, admin } = await authenticate.admin(request);
+  const shop = await getShopByDomain(session.shop);
+
+  if (!shop) {
+    return json({ success: false, error: "Shop not found" }, { status: 404 });
+  }
+
+  const settings = shop.settings ? JSON.parse(shop.settings) : DEFAULT_SHOP_SETTINGS;
+
+  // Create a bulk scan record
+  const bulkScan = await db.scan.create({
+    data: {
+      shopId: shop.id,
+      scanType: "bulk",
+      status: "running",
+    },
+  });
+
+  let scannedCount = 0;
+  let criticalCount = 0;
+  let warningCount = 0;
+  let infoCount = 0;
+
+  try {
+    // Fetch all products from Shopify
+    const products = await fetchAllProducts(admin);
+
+    await db.scan.update({
+      where: { id: bulkScan.id },
+      data: { totalProducts: products.length },
+    });
+
+    // Scan each product
+    for (const product of products) {
+      const contentHash = generateContentHash(product);
+
+      // Check if content has changed since last scan
+      const existingProduct = await db.product.findUnique({
+        where: { shopId_shopifyId: { shopId: shop.id, shopifyId: product.shopifyId } },
+      });
+
+      if (existingProduct?.contentHash === contentHash && existingProduct.complianceScore !== "NOT_SCANNED") {
+        // Content unchanged — skip re-scan, just count
+        scannedCount++;
+        continue;
+      }
+
+      const scanResult = await scanProduct(product, settings);
+
+      await saveScanResult(
+        shop.id,
+        {
+          shopifyId: product.shopifyId,
+          title: product.title,
+          description: product.description,
+          bodyHtml: product.bodyHtml,
+          tags: product.tags,
+          productType: product.productType,
+          vendor: product.vendor,
+          imageUrls: product.images.map((i) => i.url),
+          contentHash,
+        },
+        scanResult,
+        "bulk",
+      );
+
+      scannedCount++;
+      criticalCount += scanResult.findings.filter((f) => f.severity === "critical").length;
+      warningCount += scanResult.findings.filter((f) => f.severity === "warning").length;
+      infoCount += scanResult.findings.filter((f) => f.severity === "info").length;
+    }
+
+    // Update bulk scan with final counts
+    await db.scan.update({
+      where: { id: bulkScan.id },
+      data: {
+        status: "completed",
+        scannedCount,
+        criticalCount,
+        warningCount,
+        infoCount,
+        completedAt: new Date(),
+      },
+    });
+
+    return json({
+      success: true,
+      scannedCount,
+      criticalCount,
+      warningCount,
+      infoCount,
+    });
+  } catch (error) {
+    await db.scan.update({
+      where: { id: bulkScan.id },
+      data: { status: "failed", completedAt: new Date() },
+    });
+    throw error;
+  }
+}
+
 export default function ScanPage() {
-  const submit = useSubmit();
+  const { lastScan } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
+  const submit = useSubmit();
+  const navigation = useNavigation();
+  const isScanning = navigation.state === "submitting";
 
   return (
     <Page
@@ -43,7 +158,17 @@ export default function ScanPage() {
         {actionData?.success && (
           <Banner tone="success" title="Scan Complete">
             <Text as="p" variant="bodyMd">
-              {actionData.message}
+              Scanned {actionData.scannedCount} products. Found{" "}
+              {actionData.criticalCount} critical and{" "}
+              {actionData.warningCount} warning issues.
+            </Text>
+          </Banner>
+        )}
+
+        {isScanning && (
+          <Banner tone="info" title="Scan in Progress">
+            <Text as="p" variant="bodyMd">
+              Scanning your products for compliance issues...
             </Text>
           </Banner>
         )}
@@ -55,18 +180,21 @@ export default function ScanPage() {
             </Text>
             <Text as="p" variant="bodyMd">
               Scan all products in your store for regulatory compliance issues.
-              This will check product titles, descriptions, tags, metafields,
-              and images (if enabled) against our rule engine and AI analyzer.
+              Products whose content hasn't changed since the last scan will be skipped.
             </Text>
+            {lastScan && (
+              <Text as="p" variant="bodySm" tone="subdued">
+                Last scan: {new Date(lastScan.startedAt).toLocaleString()} —{" "}
+                {lastScan.totalProducts} products,{" "}
+                {lastScan.criticalCount} critical issues
+              </Text>
+            )}
             <Button
               variant="primary"
-              onClick={() => {
-                const fd = new FormData();
-                fd.set("scanType", "bulk");
-                submit(fd, { method: "post" });
-              }}
+              loading={isScanning}
+              onClick={() => submit({}, { method: "post" })}
             >
-              Start Full Scan
+              {isScanning ? "Scanning..." : "Start Full Scan"}
             </Button>
           </BlockStack>
         </Card>

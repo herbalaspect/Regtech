@@ -1,4 +1,4 @@
-import { json, type LoaderFunctionArgs } from "@remix-run/node";
+import { json, type LoaderFunctionArgs, type ActionFunctionArgs } from "@remix-run/node";
 import { useLoaderData, useSubmit } from "@remix-run/react";
 import {
   Badge,
@@ -10,41 +10,112 @@ import {
   Page,
   Text,
 } from "@shopify/polaris";
+import { authenticate } from "~/lib/shopify.server";
+import { db } from "~/lib/db.server";
+import { getShopByDomain, saveScanResult } from "~/services/db/scan-writer";
+import { fetchProduct, generateContentHash } from "~/services/shopify/products";
+import { scanProduct } from "~/services/compliance/engine";
+import { DEFAULT_SHOP_SETTINGS } from "~/lib/types";
 import { ComplianceBadge } from "~/components/ComplianceBadge";
 import { ScanResultsList } from "~/components/ScanResultsList";
 import type { ComplianceFinding, ComplianceScore } from "~/lib/types";
 
-interface ProductDetail {
-  id: string;
-  title: string;
-  category: string | null;
-  complianceScore: ComplianceScore;
-  lastScannedAt: string | null;
-  findings: ComplianceFinding[];
-  description: string;
+export async function loader({ request, params }: LoaderFunctionArgs) {
+  const { session } = await authenticate.admin(request);
+  const shop = await getShopByDomain(session.shop);
+
+  if (!shop || !params.id) {
+    throw new Response("Not Found", { status: 404 });
+  }
+
+  const product = await db.product.findFirst({
+    where: { id: params.id, shopId: shop.id },
+    include: {
+      findings: {
+        where: { resolved: false },
+        orderBy: { createdAt: "desc" },
+      },
+    },
+  });
+
+  if (!product) {
+    throw new Response("Not Found", { status: 404 });
+  }
+
+  const settings = shop.settings ? JSON.parse(shop.settings) : DEFAULT_SHOP_SETTINGS;
+
+  return json({
+    product: {
+      id: product.id,
+      shopifyId: product.shopifyId,
+      title: product.title,
+      category: product.category,
+      complianceScore: product.complianceScore as ComplianceScore,
+      lastScannedAt: product.lastScannedAt?.toISOString() ?? null,
+      description: product.description,
+      findings: product.findings.map((f) => ({
+        ruleId: f.ruleId,
+        category: f.category as ComplianceFinding["category"],
+        severity: f.severity as ComplianceFinding["severity"],
+        title: f.title,
+        description: f.description,
+        affectedText: f.affectedText ?? undefined,
+        suggestion: f.suggestion ?? undefined,
+        source: f.source as ComplianceFinding["source"],
+      })),
+    },
+    settings,
+  });
 }
 
-export async function loader({ params }: LoaderFunctionArgs) {
-  const productId = params.id;
+export async function action({ request, params }: ActionFunctionArgs) {
+  const { session, admin } = await authenticate.admin(request);
+  const shop = await getShopByDomain(session.shop);
 
-  // In production: fetch from DB
-  const product: ProductDetail = {
-    id: productId || "",
-    title: "Loading...",
-    category: null,
-    complianceScore: "NOT_SCANNED",
-    lastScannedAt: null,
-    findings: [],
-    description: "",
-  };
+  if (!shop || !params.id) {
+    return json({ success: false, error: "Shop or product not found" }, { status: 404 });
+  }
 
-  return json({ product });
-}
+  // Get the product from DB to find its shopifyId
+  const dbProduct = await db.product.findFirst({
+    where: { id: params.id, shopId: shop.id },
+  });
 
-export async function action({ params }: LoaderFunctionArgs) {
-  const productId = params.id;
-  // In production: trigger single product scan
-  return json({ success: true, productId });
+  if (!dbProduct) {
+    return json({ success: false, error: "Product not found" }, { status: 404 });
+  }
+
+  // Fetch fresh product data from Shopify
+  const productData = await fetchProduct(admin, dbProduct.shopifyId);
+  if (!productData) {
+    return json({ success: false, error: "Failed to fetch product from Shopify" }, { status: 500 });
+  }
+
+  const settings = shop.settings ? JSON.parse(shop.settings) : DEFAULT_SHOP_SETTINGS;
+  const contentHash = generateContentHash(productData);
+
+  // Run compliance scan
+  const scanResult = await scanProduct(productData, settings);
+
+  // Save to DB
+  await saveScanResult(
+    shop.id,
+    {
+      shopifyId: productData.shopifyId,
+      title: productData.title,
+      description: productData.description,
+      bodyHtml: productData.bodyHtml,
+      tags: productData.tags,
+      productType: productData.productType,
+      vendor: productData.vendor,
+      imageUrls: productData.images.map((i) => i.url),
+      contentHash,
+    },
+    scanResult,
+    "manual",
+  );
+
+  return json({ success: true });
 }
 
 export default function ProductDetailPage() {
@@ -77,7 +148,7 @@ export default function ProductDetailPage() {
                 <InlineStack gap="300" blockAlign="center">
                   <ComplianceBadge score={product.complianceScore} />
                   {product.category && (
-                    <Badge>{product.category}</Badge>
+                    <Badge>{product.category.replace("_", " ")}</Badge>
                   )}
                 </InlineStack>
                 <Text as="span" variant="bodySm" tone="subdued">

@@ -1,4 +1,4 @@
-import { json } from "@remix-run/node";
+import { json, type LoaderFunctionArgs } from "@remix-run/node";
 import { useLoaderData, useNavigate } from "@remix-run/react";
 import {
   BlockStack,
@@ -10,15 +10,45 @@ import {
   Text,
 } from "@shopify/polaris";
 import { useState } from "react";
+import { authenticate } from "~/lib/shopify.server";
+import { db } from "~/lib/db.server";
+import { getShopByDomain } from "~/services/db/scan-writer";
 import {
   ProductComplianceTable,
   type ProductRow,
 } from "~/components/ProductComplianceTable";
 import type { ComplianceScore } from "~/lib/types";
 
-export async function loader() {
-  // In production: fetch products from DB
-  const products: ProductRow[] = [];
+export async function loader({ request }: LoaderFunctionArgs) {
+  const { session } = await authenticate.admin(request);
+  const shop = await getShopByDomain(session.shop);
+
+  if (!shop) {
+    return json({ products: [] as ProductRow[] });
+  }
+
+  const dbProducts = await db.product.findMany({
+    where: { shopId: shop.id },
+    orderBy: [
+      // Sort RED first, then YELLOW, GREEN, NOT_SCANNED
+      { complianceScore: "asc" },
+      { title: "asc" },
+    ],
+    include: {
+      _count: {
+        select: { findings: { where: { resolved: false } } },
+      },
+    },
+  });
+
+  const products: ProductRow[] = dbProducts.map((p) => ({
+    id: p.id,
+    title: p.title,
+    category: p.category,
+    complianceScore: p.complianceScore as ComplianceScore,
+    findingsCount: p._count.findings,
+    lastScannedAt: p.lastScannedAt?.toISOString() ?? null,
+  }));
 
   return json({ products });
 }

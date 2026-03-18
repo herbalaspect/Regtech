@@ -1,7 +1,8 @@
-import { json, type ActionFunctionArgs } from "@remix-run/node";
-import { useLoaderData, useSubmit } from "@remix-run/react";
+import { json, type LoaderFunctionArgs, type ActionFunctionArgs } from "@remix-run/node";
+import { useLoaderData, useSubmit, useActionData } from "@remix-run/react";
 import {
   BlockStack,
+  Banner,
   Button,
   Card,
   Checkbox,
@@ -14,28 +15,51 @@ import {
   TextField,
 } from "@shopify/polaris";
 import { useCallback, useState } from "react";
+import { authenticate } from "~/lib/shopify.server";
+import { db } from "~/lib/db.server";
+import { getShopByDomain } from "~/services/db/scan-writer";
 import { DEFAULT_SHOP_SETTINGS, type ShopSettings } from "~/lib/types";
 
-export async function loader() {
-  // In production: load from DB
-  return json({ settings: DEFAULT_SHOP_SETTINGS });
+export async function loader({ request }: LoaderFunctionArgs) {
+  const { session } = await authenticate.admin(request);
+  const shop = await getShopByDomain(session.shop);
+
+  const settings: ShopSettings = shop?.settings
+    ? { ...DEFAULT_SHOP_SETTINGS, ...JSON.parse(shop.settings) }
+    : DEFAULT_SHOP_SETTINGS;
+
+  return json({ settings });
 }
 
 export async function action({ request }: ActionFunctionArgs) {
+  const { session } = await authenticate.admin(request);
+  const shop = await getShopByDomain(session.shop);
+
+  if (!shop) {
+    return json({ success: false, error: "Shop not found" }, { status: 404 });
+  }
+
   const formData = await request.formData();
   const settingsJson = formData.get("settings") as string;
 
   try {
-    const settings = JSON.parse(settingsJson) as ShopSettings;
-    // In production: save to DB
-    return json({ success: true, settings });
+    const parsed = JSON.parse(settingsJson) as Partial<ShopSettings>;
+    const merged = { ...DEFAULT_SHOP_SETTINGS, ...parsed };
+
+    await db.shop.update({
+      where: { id: shop.id },
+      data: { settings: JSON.stringify(merged) },
+    });
+
+    return json({ success: true });
   } catch {
-    return json({ success: false, error: "Invalid settings" }, { status: 400 });
+    return json({ success: false, error: "Invalid settings format" }, { status: 400 });
   }
 }
 
 export default function SettingsPage() {
   const { settings: initialSettings } = useLoaderData<typeof loader>();
+  const actionData = useActionData<typeof action>();
   const [settings, setSettings] = useState<ShopSettings>(initialSettings);
   const submit = useSubmit();
 
@@ -71,6 +95,13 @@ export default function SettingsPage() {
         </Button>
       }
     >
+      {actionData?.success && (
+        <Banner tone="success" title="Settings saved" />
+      )}
+      {actionData && !actionData.success && "error" in actionData && (
+        <Banner tone="critical" title={actionData.error as string} />
+      )}
+
       <Layout>
         {/* Category Configuration */}
         <Layout.AnnotatedSection

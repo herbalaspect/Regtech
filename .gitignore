@@ -4,7 +4,7 @@ build/
 .env
 *.db
 *.db-journal
-prisma/migrations/
+# prisma/migrations/ — keep migrations committed
 dist/
 coverage/
 .DS_Store
