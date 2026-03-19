@@ -1,11 +1,13 @@
 import type {
   ComplianceFinding,
   ComplianceScore,
+  PlanTier,
   ProductCategory,
   ProductData,
   ScanResult,
   ShopSettings,
 } from "~/lib/types";
+import { PLAN_LIMITS } from "~/lib/types";
 import { classifyProduct } from "./classifier";
 import { runRules } from "./rule-runner";
 import { analyzeClaimsWithAI } from "./ai-analyzer";
@@ -14,12 +16,16 @@ import { getAllRulesForCategory } from "./rules/index";
 
 /**
  * Main scan orchestrator. Runs the full compliance pipeline on a product.
+ * Plan tier controls which analysis stages run.
  */
 export async function scanProduct(
   product: ProductData,
   settings: ShopSettings,
   categoryOverride?: ProductCategory,
+  planTier: PlanTier = "compliance",
 ): Promise<ScanResult> {
+  const limits = PLAN_LIMITS[planTier];
+
   // Step 1: Classify product category
   const category = categoryOverride || classifyProduct(product).category;
 
@@ -32,34 +38,26 @@ export async function scanProduct(
   // Step 3: Run deterministic rule engine
   const ruleFindings = runRules(product, rules, settings);
 
-  // Step 4: Run AI text analysis (if enabled)
-  let aiFindings: ComplianceFinding[] = [];
-  if (settings.aiTextAnalysis && category !== "unknown") {
-    try {
-      aiFindings = await analyzeClaimsWithAI(
-        product,
-        category,
-        settings.anthropicApiKey,
-      );
-    } catch (error) {
-      console.error("AI text analysis failed, continuing with rule engine only:", error);
-    }
-  }
+  // Step 4 & 5: Run AI text + image analysis in parallel (if plan allows)
+  const aiEnabled = settings.aiTextAnalysis && limits.aiTextAnalysis && category !== "unknown";
+  const imageEnabled = settings.imageScanning && limits.imageScanning && settings.scanScope.images && product.images.length > 0;
 
-  // Step 5: Run image analysis (if enabled)
-  let imageFindings: ComplianceFinding[] = [];
-  if (settings.imageScanning && settings.scanScope.images && product.images.length > 0) {
-    try {
-      const imageResults = await analyzeProductImages(
-        product,
-        category,
-        settings.anthropicApiKey,
-      );
-      imageFindings = imageResults.flatMap((r) => r.findings);
-    } catch (error) {
-      console.error("Image analysis failed, continuing without:", error);
-    }
-  }
+  const [aiFindings, imageFindings] = await Promise.all([
+    aiEnabled
+      ? analyzeClaimsWithAI(product, category).catch((error) => {
+          console.error("AI text analysis failed, continuing with rule engine only:", error);
+          return [] as ComplianceFinding[];
+        })
+      : Promise.resolve([] as ComplianceFinding[]),
+    imageEnabled
+      ? analyzeProductImages(product, category).then((results) =>
+          results.flatMap((r) => r.findings),
+        ).catch((error) => {
+          console.error("Image analysis failed, continuing without:", error);
+          return [] as ComplianceFinding[];
+        })
+      : Promise.resolve([] as ComplianceFinding[]),
+  ]);
 
   // Step 6: Merge and deduplicate findings
   const allFindings = deduplicateFindings([
@@ -82,17 +80,25 @@ export async function scanProduct(
 }
 
 /**
- * Scan multiple products in bulk.
+ * Scan multiple products in bulk with controlled concurrency.
  */
 export async function scanProducts(
   products: ProductData[],
   settings: ShopSettings,
+  planTier: PlanTier = "compliance",
 ): Promise<ScanResult[]> {
+  const limits = PLAN_LIMITS[planTier];
+  const maxProducts = Math.min(products.length, limits.maxProducts);
+  const toScan = products.slice(0, maxProducts);
   const results: ScanResult[] = [];
+  const BATCH_SIZE = 5;
 
-  for (const product of products) {
-    const result = await scanProduct(product, settings);
-    results.push(result);
+  for (let i = 0; i < toScan.length; i += BATCH_SIZE) {
+    const batch = toScan.slice(i, i + BATCH_SIZE);
+    const batchResults = await Promise.all(
+      batch.map((product) => scanProduct(product, settings, undefined, planTier)),
+    );
+    results.push(...batchResults);
   }
 
   return results;

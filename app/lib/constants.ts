@@ -328,3 +328,70 @@ export const SCANNABLE_FIELDS = [
   "metafields",
   "images",
 ] as const;
+
+// ── Plan Definitions ──────────────────────────────────────────────
+
+export const PLAN_DEFINITIONS = [
+  {
+    tier: "compliance" as const,
+    name: "Compliance",
+    price: 79,
+    pricePeriod: "month" as const,
+    description: "Rule-based compliance scanning for small stores",
+    features: [
+      "Up to 100 products",
+      "40+ regulatory rules across 5 categories",
+      "FDA, FTC, DSHEA compliance checks",
+      "Product classification engine",
+      "CSV export",
+      "Email notifications",
+      "Webhook-based auto-scan",
+    ],
+    notIncluded: [
+      "AI text analysis (Claude)",
+      "Image/label scanning",
+      "Scheduled scans",
+      "PDF compliance reports",
+      "External webhook integrations",
+      "Storefront compliance badge",
+      "Custom rules",
+    ],
+  },
+  {
+    tier: "compliance_pro" as const,
+    name: "Compliance Pro",
+    price: 199,
+    pricePeriod: "month" as const,
+    description: "AI-powered compliance for growing brands",
+    features: [
+      "Up to 1,000 products",
+      "Everything in Compliance, plus:",
+      "AI text analysis (Claude) — nuanced claim detection",
+      "Image & label scanning (Claude Vision)",
+      "Scheduled daily/weekly scans",
+      "PDF compliance reports",
+      "External webhook integrations",
+      "Storefront compliance badge",
+    ],
+    notIncluded: [
+      "Unlimited products",
+      "Custom rules engine",
+    ],
+  },
+  {
+    tier: "enterprise" as const,
+    name: "Enterprise",
+    price: null,
+    pricePeriod: "month" as const,
+    description: "Unlimited compliance for large catalogs",
+    features: [
+      "Unlimited products",
+      "Everything in Compliance Pro, plus:",
+      "Custom compliance rules",
+      "Dedicated support",
+      "Custom integrations",
+      "SLA guarantees",
+    ],
+    notIncluded: [],
+  },
+] as const;

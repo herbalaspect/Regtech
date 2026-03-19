@@ -26,13 +26,15 @@ model Session {
 }
 
 model Shop {
-  id          String    @id @default(cuid())
-  domain      String    @unique
-  settings    String    @default("{}")
-  installedAt DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
-  products    Product[]
-  scans       Scan[]
+  id            String    @id @default(cuid())
+  domain        String    @unique
+  settings      String    @default("{}")
+  plan          String    @default("compliance")
+  planExpiresAt DateTime?
+  installedAt   DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  products      Product[]
+  scans         Scan[]
 }
 
 model Product {
@@ -51,6 +53,7 @@ model Product {
   complianceScore String       @default("NOT_SCANNED")
   lastScannedAt   DateTime?
   contentHash     String?
+  deletedAt       DateTime?
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
   shop            Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
@@ -60,6 +63,7 @@ model Product {
   @@unique([shopId, shopifyId])
   @@index([shopId])
   @@index([complianceScore])
+  @@index([shopId, complianceScore])
 }
 
 model Finding {
@@ -84,6 +88,7 @@ model Finding {
   @@index([productId])
   @@index([scanId])
   @@index([severity])
+  @@index([productId, severity, resolved])
 }
 
 model Scan {

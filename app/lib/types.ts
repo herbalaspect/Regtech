@@ -104,6 +104,57 @@ export interface ImageAnalysisResult {
   warningSymbolsDetected: string[];
 }
 
+// ── Plan Tiers ────────────────────────────────────────────────────
+export type PlanTier = "compliance" | "compliance_pro" | "enterprise";
+
+export interface PlanLimits {
+  maxProducts: number;
+  aiTextAnalysis: boolean;
+  imageScanning: boolean;
+  scheduledScans: boolean;
+  csvExport: boolean;
+  pdfExport: boolean;
+  externalWebhook: boolean;
+  storefrontBadge: boolean;
+  customRules: boolean;
+}
+
+export const PLAN_LIMITS: Record<PlanTier, PlanLimits> = {
+  compliance: {
+    maxProducts: 100,
+    aiTextAnalysis: false,
+    imageScanning: false,
+    scheduledScans: false,
+    csvExport: true,
+    pdfExport: false,
+    externalWebhook: false,
+    storefrontBadge: false,
+    customRules: false,
+  },
+  compliance_pro: {
+    maxProducts: 1000,
+    aiTextAnalysis: true,
+    imageScanning: true,
+    scheduledScans: true,
+    csvExport: true,
+    pdfExport: true,
+    externalWebhook: true,
+    storefrontBadge: true,
+    customRules: false,
+  },
+  enterprise: {
+    maxProducts: Infinity,
+    aiTextAnalysis: true,
+    imageScanning: true,
+    scheduledScans: true,
+    csvExport: true,
+    pdfExport: true,
+    externalWebhook: true,
+    storefrontBadge: true,
+    customRules: true,
+  },
+};
+
 // ── Shop Settings ──────────────────────────────────────────────────
 export interface ShopSettings {
   // Category toggles
@@ -137,9 +188,6 @@ export interface ShopSettings {
   // External integrations
   externalWebhookUrl?: string;
   storefrontBadgeEnabled: boolean;
-
-  // Claude API
-  anthropicApiKey?: string;
 }
 
 export const DEFAULT_SHOP_SETTINGS: ShopSettings = {
@@ -161,3 +209,9 @@ export const DEFAULT_SHOP_SETTINGS: ShopSettings = {
   retentionDays: 90,
   storefrontBadgeEnabled: false,
 };
+
+// ── Extended Scan Result (with plan limit info) ───────────────────
+export interface ScanResultWithLimits extends ScanResult {
+  limitReached: boolean;
+  upgradeReason?: string;
+}

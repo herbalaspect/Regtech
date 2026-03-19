@@ -17,7 +17,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
   // Ensure shop record exists in our DB
   await upsertShop(session.shop);
 
-  return json({ apiKey: process.env.SHOPIFY_API_KEY || "" });
+  // Don't expose the API key — Shopify App Bridge injects it for embedded apps
+  return json({ apiKey: "" });
 }
 
 export default function App() {
@@ -29,6 +30,7 @@ export default function App() {
         <Link to="/app" rel="home">Dashboard</Link>
         <Link to="/app/products">Products</Link>
         <Link to="/app/scan">Scan</Link>
+        <Link to="/app/pricing">Pricing</Link>
         <Link to="/app/settings">Settings</Link>
       </NavMenu>
       <Outlet />

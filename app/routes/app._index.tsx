@@ -29,14 +29,22 @@ export async function loader({ request }: LoaderFunctionArgs) {
     });
   }
 
-  // Count products by compliance score
-  const [green, yellow, red, notScanned] = await Promise.all([
-    db.product.count({ where: { shopId: shop.id, complianceScore: "GREEN" } }),
-    db.product.count({ where: { shopId: shop.id, complianceScore: "YELLOW" } }),
-    db.product.count({ where: { shopId: shop.id, complianceScore: "RED" } }),
-    db.product.count({ where: { shopId: shop.id, complianceScore: "NOT_SCANNED" } }),
-  ]);
+  // Count products by compliance score in a single query
+  const grouped = await db.product.groupBy({
+    by: ["complianceScore"],
+    where: { shopId: shop.id, deletedAt: null },
+    _count: true,
+  });
 
+  const counts: Record<string, number> = {};
+  for (const g of grouped) {
+    counts[g.complianceScore] = g._count;
+  }
+
+  const green = counts["GREEN"] || 0;
+  const yellow = counts["YELLOW"] || 0;
+  const red = counts["RED"] || 0;
+  const notScanned = counts["NOT_SCANNED"] || 0;
   const totalProducts = green + yellow + red + notScanned;
 
   // Get 10 most recent critical findings

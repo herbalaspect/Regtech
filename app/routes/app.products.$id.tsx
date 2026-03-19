@@ -15,9 +15,10 @@ import { db } from "~/lib/db.server";
 import { getShopByDomain, saveScanResult } from "~/services/db/scan-writer";
 import { fetchProduct, generateContentHash } from "~/services/shopify/products";
 import { scanProduct } from "~/services/compliance/engine";
-import { DEFAULT_SHOP_SETTINGS } from "~/lib/types";
+import { DEFAULT_SHOP_SETTINGS, PLAN_LIMITS, type PlanTier } from "~/lib/types";
 import { ComplianceBadge } from "~/components/ComplianceBadge";
 import { ScanResultsList } from "~/components/ScanResultsList";
+import { UpgradeBanner } from "~/components/UpgradeBanner";
 import type { ComplianceFinding, ComplianceScore } from "~/lib/types";
 
 export async function loader({ request, params }: LoaderFunctionArgs) {
@@ -44,6 +45,8 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
 
   const settings = shop.settings ? JSON.parse(shop.settings) : DEFAULT_SHOP_SETTINGS;
 
+  const planTier: PlanTier = (shop.plan as PlanTier) || "compliance";
+
   return json({
     product: {
       id: product.id,
@@ -65,6 +68,7 @@ export async function loader({ request, params }: LoaderFunctionArgs) {
       })),
     },
     settings,
+    planTier,
   });
 }
 
@@ -92,10 +96,11 @@ export async function action({ request, params }: ActionFunctionArgs) {
   }
 
   const settings = shop.settings ? JSON.parse(shop.settings) : DEFAULT_SHOP_SETTINGS;
+  const planTier: PlanTier = (shop.plan as PlanTier) || "compliance";
   const contentHash = generateContentHash(productData);
 
-  // Run compliance scan
-  const scanResult = await scanProduct(productData, settings);
+  // Run compliance scan with plan enforcement
+  const scanResult = await scanProduct(productData, settings, undefined, planTier);
 
   // Save to DB
   await saveScanResult(
@@ -119,8 +124,9 @@ export async function action({ request, params }: ActionFunctionArgs) {
 }
 
 export default function ProductDetailPage() {
-  const { product } = useLoaderData<typeof loader>();
+  const { product, planTier } = useLoaderData<typeof loader>();
   const submit = useSubmit();
+  const limits = PLAN_LIMITS[planTier];
 
   const criticalCount = product.findings.filter((f) => f.severity === "critical").length;
   const warningCount = product.findings.filter((f) => f.severity === "warning").length;
@@ -181,6 +187,15 @@ export default function ProductDetailPage() {
                   )}
                 </InlineStack>
               </Card>
+            )}
+
+            {/* Upgrade banner for AI features */}
+            {!limits.aiTextAnalysis && (
+              <UpgradeBanner
+                currentPlan={planTier}
+                feature="AI analysis"
+                description="Upgrade to Compliance Pro for AI-powered text analysis and image scanning to catch nuanced compliance issues."
+              />
             )}
 
             {/* Findings List */}

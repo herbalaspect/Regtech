@@ -5,6 +5,41 @@ import type {
   ShopSettings,
 } from "~/lib/types";
 
+// ── Regex pattern cache ──────────────────────────────────────────
+const patternCache = new Map<string, RegExp | null>();
+
+function getCachedRegex(pattern: string, flags: string): RegExp | null {
+  const key = `${pattern}:${flags}`;
+  if (patternCache.has(key)) {
+    const cached = patternCache.get(key)!;
+    if (cached) cached.lastIndex = 0;
+    return cached;
+  }
+  try {
+    if (!isRegexSafe(pattern)) {
+      patternCache.set(key, null);
+      return null;
+    }
+    const regex = new RegExp(pattern, flags);
+    patternCache.set(key, regex);
+    return regex;
+  } catch {
+    patternCache.set(key, null);
+    return null;
+  }
+}
+
+/**
+ * Validate regex patterns to prevent ReDoS.
+ * Rejects patterns that are too long or contain nested quantifiers.
+ */
+function isRegexSafe(pattern: string): boolean {
+  if (pattern.length > 200) return false;
+  // Detect nested quantifiers like (a+)+ or (a*)*
+  if (/(\+|\*|\{)\)?(\+|\*|\{)/.test(pattern)) return false;
+  return true;
+}
+
 /**
  * Run all applicable rules against a product and return findings.
  */
@@ -29,10 +64,13 @@ export function runRules(
 
   const fullText = textParts.join(" ").toLowerCase();
 
+  // Pre-build normalized tag set for structural rules
+  const normalizedTags = new Set(product.tags.map((t) => t.toLowerCase()));
+
   for (const rule of rules) {
     if (!rule.enabled) continue;
 
-    const result = evaluateRule(rule, fullText, product);
+    const result = evaluateRule(rule, fullText, product, normalizedTags);
     if (result) {
       findings.push(result);
     }
@@ -45,16 +83,17 @@ function evaluateRule(
   rule: ComplianceRule,
   fullText: string,
   product: ProductData,
+  normalizedTags: Set<string>,
 ): ComplianceFinding | null {
   switch (rule.ruleType) {
     case "presence":
       return checkPresence(rule, fullText);
     case "absence":
-      return checkAbsence(rule, fullText, product);
+      return checkAbsence(rule, fullText);
     case "pattern":
-      return checkPattern(rule, fullText, product);
+      return checkPattern(rule, fullText);
     case "structural":
-      return checkStructural(rule, product);
+      return checkStructural(rule, product, normalizedTags);
     default:
       return null;
   }
@@ -95,7 +134,6 @@ function checkPresence(
 function checkAbsence(
   rule: ComplianceRule,
   fullText: string,
-  product: ProductData,
 ): ComplianceFinding | null {
   if (!rule.keywords || rule.keywords.length === 0) return null;
 
@@ -126,35 +164,32 @@ function checkAbsence(
 }
 
 /**
- * PATTERN: Regex-based matching.
+ * PATTERN: Regex-based matching with cached patterns and safety checks.
  */
 function checkPattern(
   rule: ComplianceRule,
   fullText: string,
-  product: ProductData,
 ): ComplianceFinding | null {
   if (!rule.pattern) return null;
 
-  try {
-    const regex = new RegExp(rule.pattern, "gi");
-    const match = regex.exec(fullText);
+  const regex = getCachedRegex(rule.pattern, "gi");
+  if (!regex) return null;
 
-    if (match) {
-      const start = Math.max(0, match.index - 30);
-      const end = Math.min(fullText.length, match.index + match[0].length + 30);
+  const match = regex.exec(fullText);
 
-      return {
-        ruleId: rule.id,
-        category: rule.category,
-        severity: rule.severity,
-        title: rule.name,
-        description: rule.description,
-        affectedText: `...${fullText.slice(start, end)}...`,
-        source: "rule_engine",
-      };
-    }
-  } catch {
-    // Invalid regex — skip this rule
+  if (match) {
+    const start = Math.max(0, match.index - 30);
+    const end = Math.min(fullText.length, match.index + match[0].length + 30);
+
+    return {
+      ruleId: rule.id,
+      category: rule.category,
+      severity: rule.severity,
+      title: rule.name,
+      description: rule.description,
+      affectedText: `...${fullText.slice(start, end)}...`,
+      source: "rule_engine",
+    };
   }
 
   return null;
@@ -166,20 +201,14 @@ function checkPattern(
 function checkStructural(
   rule: ComplianceRule,
   product: ProductData,
+  normalizedTags: Set<string>,
 ): ComplianceFinding | null {
   if (!rule.keywords || rule.keywords.length === 0) return null;
 
-  // Structural rules use keywords as field checks:
-  // "tag:allergen-warning" → product must have this tag
-  // "metafield:compliance.disclaimer" → product must have this metafield
-  // "productType" → product type must be set
   for (const check of rule.keywords) {
     if (check.startsWith("tag:")) {
       const requiredTag = check.slice(4).toLowerCase();
-      const hasTag = product.tags.some(
-        (t) => t.toLowerCase() === requiredTag,
-      );
-      if (!hasTag) {
+      if (!normalizedTags.has(requiredTag)) {
         return {
           ruleId: rule.id,
           category: rule.category,

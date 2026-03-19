@@ -7,14 +7,14 @@ import {
   Card,
   Page,
   Text,
-  ProgressBar,
 } from "@shopify/polaris";
 import { authenticate } from "~/lib/shopify.server";
 import { db } from "~/lib/db.server";
-import { getShopByDomain, saveScanResult, upsertProduct } from "~/services/db/scan-writer";
+import { getShopByDomain, saveScanResult } from "~/services/db/scan-writer";
 import { fetchAllProducts, generateContentHash } from "~/services/shopify/products";
 import { scanProduct } from "~/services/compliance/engine";
-import { DEFAULT_SHOP_SETTINGS } from "~/lib/types";
+import { DEFAULT_SHOP_SETTINGS, PLAN_LIMITS, type PlanTier } from "~/lib/types";
+import { UpgradeBanner } from "~/components/UpgradeBanner";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
@@ -27,7 +27,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
       })
     : null;
 
+  const planTier: PlanTier = (shop?.plan as PlanTier) || "compliance";
+
   return json({
+    planTier,
     lastScan: lastScan
       ? {
           startedAt: lastScan.startedAt.toISOString(),
@@ -48,7 +51,11 @@ export async function action({ request }: ActionFunctionArgs) {
     return json({ success: false, error: "Shop not found" }, { status: 404 });
   }
 
-  const settings = shop.settings ? JSON.parse(shop.settings) : DEFAULT_SHOP_SETTINGS;
+  const planTier: PlanTier = (shop.plan as PlanTier) || "compliance";
+  const limits = PLAN_LIMITS[planTier];
+  const settings = shop.settings
+    ? { ...DEFAULT_SHOP_SETTINGS, ...JSON.parse(shop.settings) }
+    : DEFAULT_SHOP_SETTINGS;
 
   // Create a bulk scan record
   const bulkScan = await db.scan.create({
@@ -63,54 +70,75 @@ export async function action({ request }: ActionFunctionArgs) {
   let criticalCount = 0;
   let warningCount = 0;
   let infoCount = 0;
+  let limitReached = false;
 
   try {
     // Fetch all products from Shopify
     const products = await fetchAllProducts(admin);
 
+    // Enforce plan product limit
+    const productsToScan = products.slice(0, limits.maxProducts);
+    limitReached = products.length > limits.maxProducts;
+
     await db.scan.update({
       where: { id: bulkScan.id },
-      data: { totalProducts: products.length },
+      data: { totalProducts: productsToScan.length },
     });
 
-    // Scan each product
-    for (const product of products) {
-      const contentHash = generateContentHash(product);
+    // Pre-fetch all existing products to avoid N+1 queries
+    const existingProducts = await db.product.findMany({
+      where: { shopId: shop.id },
+      select: { shopifyId: true, contentHash: true, complianceScore: true },
+    });
+    const existingMap = new Map(
+      existingProducts.map((p) => [p.shopifyId, p]),
+    );
 
-      // Check if content has changed since last scan
-      const existingProduct = await db.product.findUnique({
-        where: { shopId_shopifyId: { shopId: shop.id, shopifyId: product.shopifyId } },
+    // Process in batches of 5
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < productsToScan.length; i += BATCH_SIZE) {
+      const batch = productsToScan.slice(i, i + BATCH_SIZE);
+
+      const batchPromises = batch.map(async (product) => {
+        const contentHash = generateContentHash(product);
+        const existing = existingMap.get(product.shopifyId);
+
+        if (existing?.contentHash === contentHash && existing.complianceScore !== "NOT_SCANNED") {
+          return null; // Skip unchanged products
+        }
+
+        const scanResult = await scanProduct(product, settings, undefined, planTier);
+
+        await saveScanResult(
+          shop.id,
+          {
+            shopifyId: product.shopifyId,
+            title: product.title,
+            description: product.description,
+            bodyHtml: product.bodyHtml,
+            tags: product.tags,
+            productType: product.productType,
+            vendor: product.vendor,
+            imageUrls: product.images.map((img) => img.url),
+            contentHash,
+          },
+          scanResult,
+          "bulk",
+        );
+
+        return scanResult;
       });
 
-      if (existingProduct?.contentHash === contentHash && existingProduct.complianceScore !== "NOT_SCANNED") {
-        // Content unchanged — skip re-scan, just count
+      const batchResults = await Promise.all(batchPromises);
+
+      for (const result of batchResults) {
         scannedCount++;
-        continue;
+        if (result) {
+          criticalCount += result.findings.filter((f) => f.severity === "critical").length;
+          warningCount += result.findings.filter((f) => f.severity === "warning").length;
+          infoCount += result.findings.filter((f) => f.severity === "info").length;
+        }
       }
-
-      const scanResult = await scanProduct(product, settings);
-
-      await saveScanResult(
-        shop.id,
-        {
-          shopifyId: product.shopifyId,
-          title: product.title,
-          description: product.description,
-          bodyHtml: product.bodyHtml,
-          tags: product.tags,
-          productType: product.productType,
-          vendor: product.vendor,
-          imageUrls: product.images.map((i) => i.url),
-          contentHash,
-        },
-        scanResult,
-        "bulk",
-      );
-
-      scannedCount++;
-      criticalCount += scanResult.findings.filter((f) => f.severity === "critical").length;
-      warningCount += scanResult.findings.filter((f) => f.severity === "warning").length;
-      infoCount += scanResult.findings.filter((f) => f.severity === "info").length;
     }
 
     // Update bulk scan with final counts
@@ -132,6 +160,7 @@ export async function action({ request }: ActionFunctionArgs) {
       criticalCount,
       warningCount,
       infoCount,
+      limitReached,
     });
   } catch (error) {
     await db.scan.update({
@@ -143,11 +172,12 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function ScanPage() {
-  const { lastScan } = useLoaderData<typeof loader>();
+  const { lastScan, planTier } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const submit = useSubmit();
   const navigation = useNavigation();
   const isScanning = navigation.state === "submitting";
+  const limits = PLAN_LIMITS[planTier];
 
   return (
     <Page
@@ -155,7 +185,7 @@ export default function ScanPage() {
       backAction={{ url: "/app" }}
     >
       <BlockStack gap="500">
-        {actionData?.success && (
+        {actionData?.success && "scannedCount" in actionData && (
           <Banner tone="success" title="Scan Complete">
             <Text as="p" variant="bodyMd">
               Scanned {actionData.scannedCount} products. Found{" "}
@@ -163,6 +193,14 @@ export default function ScanPage() {
               {actionData.warningCount} warning issues.
             </Text>
           </Banner>
+        )}
+
+        {actionData && "limitReached" in actionData && actionData.limitReached && (
+          <UpgradeBanner
+            currentPlan={planTier}
+            feature="more products"
+            description={`Your ${planTier === "compliance" ? "Compliance" : "Pro"} plan is limited to ${limits.maxProducts} products. Upgrade to scan your full catalog.`}
+          />
         )}
 
         {isScanning && (
@@ -181,6 +219,11 @@ export default function ScanPage() {
             <Text as="p" variant="bodyMd">
               Scan all products in your store for regulatory compliance issues.
               Products whose content hasn't changed since the last scan will be skipped.
+            </Text>
+            <Text as="p" variant="bodySm" tone="subdued">
+              Plan limit: up to {limits.maxProducts === Infinity ? "unlimited" : limits.maxProducts} products
+              {limits.aiTextAnalysis ? " • AI text analysis enabled" : ""}
+              {limits.imageScanning ? " • Image scanning enabled" : ""}
             </Text>
             {lastScan && (
               <Text as="p" variant="bodySm" tone="subdued">
@@ -214,11 +257,13 @@ export default function ScanPage() {
                 <strong>AI Text Analysis</strong> — Claude analyzes product text
                 for nuanced health claims, structure/function vs drug claim
                 classification, and contextual severity assessment.
+                {!limits.aiTextAnalysis && " (Requires Pro plan)"}
               </Text>
               <Text as="p" variant="bodyMd">
                 <strong>Image Scanning</strong> — Claude Vision examines product
                 images for label compliance, packaging claims, warning symbols,
                 and label-vs-listing discrepancies.
+                {!limits.imageScanning && " (Requires Pro plan)"}
               </Text>
             </BlockStack>
           </BlockStack>

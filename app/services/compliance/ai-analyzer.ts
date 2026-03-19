@@ -7,18 +7,20 @@ import type {
   ProductData,
 } from "~/lib/types";
 
+// ── Anthropic client singleton ───────────────────────────────────
 let client: Anthropic | null = null;
 
-function getClient(apiKey?: string): Anthropic {
-  if (!client || apiKey) {
-    client = new Anthropic({ apiKey: apiKey || process.env.ANTHROPIC_API_KEY });
+function getClient(): Anthropic {
+  if (!client) {
+    client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   }
   return client;
 }
 
-// ── Simple in-memory cache ─────────────────────────────────────────
-const cache = new Map<string, { result: unknown; timestamp: number }>();
+// ── Bounded in-memory cache ──────────────────────────────────────
+const MAX_CACHE_SIZE = 1000;
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const cache = new Map<string, { result: unknown; timestamp: number }>();
 
 function getCached<T>(key: string): T | null {
   const entry = cache.get(key);
@@ -30,22 +32,46 @@ function getCached<T>(key: string): T | null {
 }
 
 function setCache(key: string, result: unknown): void {
+  // Evict oldest entries when at capacity
+  if (cache.size >= MAX_CACHE_SIZE) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey) cache.delete(firstKey);
+  }
   cache.set(key, { result, timestamp: Date.now() });
+}
+
+// Periodic cleanup of expired entries
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of cache) {
+    if (now - entry.timestamp > CACHE_TTL_MS) {
+      cache.delete(key);
+    }
+  }
+}, 30 * 60 * 1000);
+
+/**
+ * Wrap an API call with a timeout.
+ */
+async function withTimeout<T>(promise: Promise<T>, ms = 15000): Promise<T> {
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error("API call timed out")), ms),
+  );
+  return Promise.race([promise, timeout]);
 }
 
 // ── Product Classification ─────────────────────────────────────────
 
 export async function classifyProductWithAI(
   product: ProductData,
-  apiKey?: string,
 ): Promise<ClassificationResult> {
   const cacheKey = `classify:${product.shopifyId}:${product.title}`;
   const cached = getCached<ClassificationResult>(cacheKey);
   if (cached) return cached;
 
-  const anthropic = getClient(apiKey);
+  const anthropic = getClient();
 
-  const message = await anthropic.messages.create({
+  const message = await withTimeout(anthropic.messages.create({
     model: "claude-sonnet-4-20250514",
     max_tokens: 512,
     messages: [
@@ -69,7 +95,7 @@ Respond in JSON format only:
 {"category": "...", "confidence": 0.0-1.0, "reasoning": "..."}`,
       },
     ],
-  });
+  }));
 
   const text =
     message.content[0].type === "text" ? message.content[0].text : "";
@@ -88,17 +114,16 @@ Respond in JSON format only:
 export async function analyzeClaimsWithAI(
   product: ProductData,
   category: ProductCategory,
-  apiKey?: string,
 ): Promise<ComplianceFinding[]> {
   const cacheKey = `claims:${product.shopifyId}:${category}:${product.description.slice(0, 50)}`;
   const cached = getCached<ComplianceFinding[]>(cacheKey);
   if (cached) return cached;
 
-  const anthropic = getClient(apiKey);
+  const anthropic = getClient();
 
   const categoryContext = getCategoryContext(category);
 
-  const message = await anthropic.messages.create({
+  const message = await withTimeout(anthropic.messages.create({
     model: "claude-sonnet-4-20250514",
     max_tokens: 2048,
     messages: [
@@ -131,7 +156,7 @@ Respond in JSON format only as an array:
 If no issues found, return an empty array: []`,
       },
     ],
-  });
+  }));
 
   const text =
     message.content[0].type === "text" ? message.content[0].text : "[]";
@@ -164,11 +189,10 @@ If no issues found, return an empty array: []`,
 export async function suggestFixWithAI(
   finding: ComplianceFinding,
   productDescription: string,
-  apiKey?: string,
 ): Promise<string> {
-  const anthropic = getClient(apiKey);
+  const anthropic = getClient();
 
-  const message = await anthropic.messages.create({
+  const message = await withTimeout(anthropic.messages.create({
     model: "claude-sonnet-4-20250514",
     max_tokens: 512,
     messages: [
@@ -187,7 +211,7 @@ ${productDescription.slice(0, 500)}
 Provide a specific, compliant rewrite of the affected text. Keep the marketing intent but make it regulatory compliant. Response should be ONLY the rewritten text, nothing else.`,
       },
     ],
-  });
+  }));
 
   return message.content[0].type === "text" ? message.content[0].text : "";
 }

@@ -1,11 +1,12 @@
 import { json, type LoaderFunctionArgs } from "@remix-run/node";
-import { useLoaderData, useNavigate } from "@remix-run/react";
+import { useLoaderData, useNavigate, useSearchParams } from "@remix-run/react";
 import {
   BlockStack,
   Button,
   Card,
   InlineStack,
   Page,
+  Pagination,
   Select,
   Text,
 } from "@shopify/polaris";
@@ -19,49 +20,91 @@ import {
 } from "~/components/ProductComplianceTable";
 import type { ComplianceScore } from "~/lib/types";
 
+const PAGE_SIZE = 25;
+
+// Severity sort order: RED first, YELLOW, NOT_SCANNED, GREEN last
+const SEVERITY_ORDER: Record<string, number> = {
+  RED: 0,
+  YELLOW: 1,
+  NOT_SCANNED: 2,
+  GREEN: 3,
+};
+
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
   const shop = await getShopByDomain(session.shop);
+  const url = new URL(request.url);
+  const page = Math.max(1, parseInt(url.searchParams.get("page") || "1"));
+  const filter = url.searchParams.get("filter") || "all";
 
   if (!shop) {
-    return json({ products: [] as ProductRow[] });
+    return json({ products: [] as ProductRow[], totalCount: 0, page: 1, totalPages: 1, filter });
   }
 
-  const dbProducts = await db.product.findMany({
-    where: { shopId: shop.id },
-    orderBy: [
-      // Sort RED first, then YELLOW, GREEN, NOT_SCANNED
-      { complianceScore: "asc" },
-      { title: "asc" },
-    ],
-    include: {
-      _count: {
-        select: { findings: { where: { resolved: false } } },
+  const where: Record<string, unknown> = { shopId: shop.id, deletedAt: null };
+  if (filter !== "all") {
+    where.complianceScore = filter;
+  }
+
+  const [totalCount, dbProducts] = await Promise.all([
+    db.product.count({ where }),
+    db.product.findMany({
+      where,
+      skip: (page - 1) * PAGE_SIZE,
+      take: PAGE_SIZE,
+      include: {
+        _count: {
+          select: { findings: { where: { resolved: false } } },
+        },
       },
-    },
-  });
+    }),
+  ]);
 
-  const products: ProductRow[] = dbProducts.map((p) => ({
-    id: p.id,
-    title: p.title,
-    category: p.category,
-    complianceScore: p.complianceScore as ComplianceScore,
-    findingsCount: p._count.findings,
-    lastScannedAt: p.lastScannedAt?.toISOString() ?? null,
-  }));
+  // Sort in-memory by severity order, then by title
+  const products: ProductRow[] = dbProducts
+    .map((p) => ({
+      id: p.id,
+      title: p.title,
+      category: p.category,
+      complianceScore: p.complianceScore as ComplianceScore,
+      findingsCount: p._count.findings,
+      lastScannedAt: p.lastScannedAt?.toISOString() ?? null,
+    }))
+    .sort((a, b) => {
+      const aOrder = SEVERITY_ORDER[a.complianceScore] ?? 99;
+      const bOrder = SEVERITY_ORDER[b.complianceScore] ?? 99;
+      if (aOrder !== bOrder) return aOrder - bOrder;
+      return a.title.localeCompare(b.title);
+    });
 
-  return json({ products });
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+
+  return json({ products, totalCount, page, totalPages, filter });
 }
 
 export default function ProductsPage() {
-  const { products } = useLoaderData<typeof loader>();
+  const { products, totalCount, page, totalPages, filter: initialFilter } = useLoaderData<typeof loader>();
   const navigate = useNavigate();
-  const [filter, setFilter] = useState<string>("all");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [filter, setFilter] = useState<string>(initialFilter);
 
-  const filteredProducts = products.filter((p) => {
-    if (filter === "all") return true;
-    return p.complianceScore === filter;
-  });
+  const handleFilterChange = (value: string) => {
+    setFilter(value);
+    const params = new URLSearchParams(searchParams);
+    if (value === "all") {
+      params.delete("filter");
+    } else {
+      params.set("filter", value);
+    }
+    params.set("page", "1");
+    setSearchParams(params);
+  };
+
+  const handlePageChange = (newPage: number) => {
+    const params = new URLSearchParams(searchParams);
+    params.set("page", String(newPage));
+    setSearchParams(params);
+  };
 
   return (
     <Page
@@ -87,20 +130,20 @@ export default function ProductsPage() {
                 { label: "Not Scanned", value: "NOT_SCANNED" },
               ]}
               value={filter}
-              onChange={setFilter}
+              onChange={handleFilterChange}
             />
             <Text as="span" variant="bodySm" tone="subdued">
-              {filteredProducts.length} product{filteredProducts.length !== 1 ? "s" : ""}
+              {totalCount} product{totalCount !== 1 ? "s" : ""}
             </Text>
           </InlineStack>
         </Card>
 
         <Card padding="0">
-          {filteredProducts.length === 0 ? (
+          {products.length === 0 ? (
             <div style={{ padding: "2rem", textAlign: "center" }}>
               <BlockStack gap="300" inlineAlign="center">
                 <Text as="p" variant="bodyMd" tone="subdued">
-                  {products.length === 0
+                  {totalCount === 0
                     ? "No products synced yet. Click 'Scan All' to import and scan your products."
                     : "No products match the current filter."}
                 </Text>
@@ -108,11 +151,23 @@ export default function ProductsPage() {
             </div>
           ) : (
             <ProductComplianceTable
-              products={filteredProducts}
+              products={products}
               onProductClick={(id) => navigate(`/app/products/${id}`)}
             />
           )}
         </Card>
+
+        {totalPages > 1 && (
+          <InlineStack align="center">
+            <Pagination
+              hasPrevious={page > 1}
+              hasNext={page < totalPages}
+              onPrevious={() => handlePageChange(page - 1)}
+              onNext={() => handlePageChange(page + 1)}
+              label={`Page ${page} of ${totalPages}`}
+            />
+          </InlineStack>
+        )}
       </BlockStack>
     </Page>
   );

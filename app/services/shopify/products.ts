@@ -4,17 +4,16 @@ import type { ProductData, ProductImage } from "~/lib/types";
  * Fetch all products from a Shopify store via Admin GraphQL API.
  */
 export async function fetchAllProducts(
-  admin: { graphql: (query: string) => Promise<Response> },
+  admin: { graphql: (query: string, options?: { variables?: Record<string, unknown> }) => Promise<Response> },
 ): Promise<ProductData[]> {
   const products: ProductData[] = [];
   let cursor: string | null = null;
   let hasNextPage = true;
 
   while (hasNextPage) {
-    const afterClause = cursor ? `, after: "${cursor}"` : "";
-    const response = await admin.graphql(`
-      {
-        products(first: 50${afterClause}) {
+    const response = await admin.graphql(
+      `query FetchProducts($first: Int!, $after: String) {
+        products(first: $first, after: $after) {
           edges {
             cursor
             node {
@@ -49,8 +48,9 @@ export async function fetchAllProducts(
             hasNextPage
           }
         }
-      }
-    `);
+      }`,
+      { variables: { first: 50, after: cursor } },
+    );
 
     const json = await response.json();
     const data = json.data?.products;
@@ -73,12 +73,12 @@ export async function fetchAllProducts(
  * Fetch a single product by Shopify GID.
  */
 export async function fetchProduct(
-  admin: { graphql: (query: string) => Promise<Response> },
+  admin: { graphql: (query: string, options?: { variables?: Record<string, unknown> }) => Promise<Response> },
   shopifyId: string,
 ): Promise<ProductData | null> {
-  const response = await admin.graphql(`
-    {
-      product(id: "${shopifyId}") {
+  const response = await admin.graphql(
+    `query FetchProduct($id: ID!) {
+      product(id: $id) {
         id
         title
         description
@@ -105,8 +105,9 @@ export async function fetchProduct(
           }
         }
       }
-    }
-  `);
+    }`,
+    { variables: { id: shopifyId } },
+  );
 
   const json = await response.json();
   const node = json.data?.product;

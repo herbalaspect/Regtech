@@ -6,9 +6,19 @@ import type {
   ProductData,
 } from "~/lib/types";
 
+// ── Reusable Anthropic client ─────────────────────────────────────
+let client: Anthropic | null = null;
+
+function getClient(): Anthropic {
+  if (!client) {
+    client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+  return client;
+}
+
 // ── Image analysis cache ───────────────────────────────────────────
 const imageCache = new Map<string, { result: ImageAnalysisResult; timestamp: number }>();
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour (images change less frequently)
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 function getCachedImage(key: string): ImageAnalysisResult | null {
   const entry = imageCache.get(key);
@@ -19,52 +29,64 @@ function getCachedImage(key: string): ImageAnalysisResult | null {
   return null;
 }
 
-// ── Analyze Product Images ─────────────────────────────────────────
+// ── Analyze Product Images (parallelized with concurrency cap) ────
+
+const MAX_CONCURRENT_IMAGES = 3;
 
 export async function analyzeProductImages(
   product: ProductData,
   category: ProductCategory,
-  apiKey?: string,
 ): Promise<ImageAnalysisResult[]> {
   if (!product.images || product.images.length === 0) return [];
 
-  const results: ImageAnalysisResult[] = [];
-
-  // Analyze each image (limit to first 5 to control costs)
   const imagesToAnalyze = product.images.slice(0, 5);
 
-  for (const image of imagesToAnalyze) {
+  // Check cache first, separate cached from uncached
+  const results: ImageAnalysisResult[] = [];
+  const uncached: { index: number; url: string }[] = [];
+
+  for (let i = 0; i < imagesToAnalyze.length; i++) {
+    const image = imagesToAnalyze[i];
     const cacheKey = `img:${image.url}:${category}`;
     const cached = getCachedImage(cacheKey);
     if (cached) {
-      results.push(cached);
-      continue;
-    }
-
-    try {
-      const result = await analyzeSingleImage(image.url, product, category, apiKey);
-      imageCache.set(cacheKey, { result, timestamp: Date.now() });
-      results.push(result);
-    } catch (error) {
-      // Skip images that fail to analyze
-      console.error(`Failed to analyze image ${image.url}:`, error);
+      results[i] = cached;
+    } else {
+      uncached.push({ index: i, url: image.url });
     }
   }
 
-  return results;
+  // Process uncached images in parallel batches
+  for (let i = 0; i < uncached.length; i += MAX_CONCURRENT_IMAGES) {
+    const batch = uncached.slice(i, i + MAX_CONCURRENT_IMAGES);
+    const settled = await Promise.allSettled(
+      batch.map(({ url }) => analyzeSingleImage(url, product, category)),
+    );
+
+    for (let j = 0; j < settled.length; j++) {
+      const item = settled[j];
+      const { index, url } = batch[j];
+      if (item.status === "fulfilled") {
+        results[index] = item.value;
+        imageCache.set(`img:${url}:${category}`, { result: item.value, timestamp: Date.now() });
+      } else {
+        console.error(`Failed to analyze image ${url}:`, item.reason);
+      }
+    }
+  }
+
+  return results.filter(Boolean);
 }
 
 async function analyzeSingleImage(
   imageUrl: string,
   product: ProductData,
   category: ProductCategory,
-  apiKey?: string,
 ): Promise<ImageAnalysisResult> {
-  const client = new Anthropic({ apiKey: apiKey || process.env.ANTHROPIC_API_KEY });
-
+  const anthropic = getClient();
   const categoryPrompt = getImageAnalysisPrompt(category);
 
-  const message = await client.messages.create({
+  const message = await anthropic.messages.create({
     model: "claude-sonnet-4-20250514",
     max_tokens: 2048,
     messages: [

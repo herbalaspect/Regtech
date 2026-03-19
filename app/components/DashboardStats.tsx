@@ -21,7 +21,7 @@ export function DashboardStats({
   notScanned,
 }: DashboardStatsProps) {
   return (
-    <InlineGrid columns={4} gap="400">
+    <InlineGrid columns={{ xs: 1, sm: 2, lg: 4 }} gap="400">
       <Card>
         <BlockStack gap="200">
           <Text as="p" variant="bodySm" tone="subdued">

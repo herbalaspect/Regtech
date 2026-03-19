@@ -18,7 +18,8 @@ import { useCallback, useState } from "react";
 import { authenticate } from "~/lib/shopify.server";
 import { db } from "~/lib/db.server";
 import { getShopByDomain } from "~/services/db/scan-writer";
-import { DEFAULT_SHOP_SETTINGS, type ShopSettings } from "~/lib/types";
+import { DEFAULT_SHOP_SETTINGS, PLAN_LIMITS, type PlanTier, type ShopSettings } from "~/lib/types";
+import { UpgradeBanner } from "~/components/UpgradeBanner";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
@@ -28,7 +29,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     ? { ...DEFAULT_SHOP_SETTINGS, ...JSON.parse(shop.settings) }
     : DEFAULT_SHOP_SETTINGS;
 
-  return json({ settings });
+  const planTier: PlanTier = (shop?.plan as PlanTier) || "compliance";
+
+  return json({ settings, planTier });
 }
 
 export async function action({ request }: ActionFunctionArgs) {
@@ -44,6 +47,23 @@ export async function action({ request }: ActionFunctionArgs) {
 
   try {
     const parsed = JSON.parse(settingsJson) as Partial<ShopSettings>;
+
+    // Validate required fields
+    if (parsed.notificationEmails) {
+      const validEmails = parsed.notificationEmails.filter(
+        (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e),
+      );
+      parsed.notificationEmails = validEmails;
+    }
+
+    if (parsed.externalWebhookUrl && parsed.externalWebhookUrl.length > 0) {
+      try {
+        new URL(parsed.externalWebhookUrl);
+      } catch {
+        return json({ success: false, error: "Invalid webhook URL" }, { status: 400 });
+      }
+    }
+
     const merged = { ...DEFAULT_SHOP_SETTINGS, ...parsed };
 
     await db.shop.update({
@@ -58,10 +78,11 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function SettingsPage() {
-  const { settings: initialSettings } = useLoaderData<typeof loader>();
+  const { settings: initialSettings, planTier } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const [settings, setSettings] = useState<ShopSettings>(initialSettings);
   const submit = useSubmit();
+  const limits = PLAN_LIMITS[planTier];
 
   const updateSettings = useCallback(
     (updates: Partial<ShopSettings>) => {
@@ -103,6 +124,28 @@ export default function SettingsPage() {
       )}
 
       <Layout>
+        {/* Current Plan Info */}
+        <Layout.AnnotatedSection
+          title="Current Plan"
+          description="Your active subscription plan."
+        >
+          <Card>
+            <BlockStack gap="300">
+              <Text as="p" variant="headingMd">
+                {planTier === "compliance" && "Compliance — $79/mo"}
+                {planTier === "compliance_pro" && "Compliance Pro — $199/mo"}
+                {planTier === "enterprise" && "Enterprise — Custom"}
+              </Text>
+              <Text as="p" variant="bodySm" tone="subdued">
+                {planTier === "compliance" && "Rule-based scanning for up to 100 products"}
+                {planTier === "compliance_pro" && "AI-powered scanning for up to 1,000 products"}
+                {planTier === "enterprise" && "Unlimited products with custom rules"}
+              </Text>
+              <Button url="/app/pricing">View Plans</Button>
+            </BlockStack>
+          </Card>
+        </Layout.AnnotatedSection>
+
         {/* Category Configuration */}
         <Layout.AnnotatedSection
           title="Product Categories"
@@ -185,8 +228,12 @@ export default function SettingsPage() {
                   options={[
                     { label: "Manual only", value: "manual" },
                     { label: "On product change (webhook)", value: "on_change" },
-                    { label: "Daily", value: "daily" },
-                    { label: "Weekly", value: "weekly" },
+                    ...(limits.scheduledScans
+                      ? [
+                          { label: "Daily", value: "daily" },
+                          { label: "Weekly", value: "weekly" },
+                        ]
+                      : []),
                   ]}
                   value={settings.scanFrequency}
                   onChange={(v) =>
@@ -195,20 +242,36 @@ export default function SettingsPage() {
                     })
                   }
                 />
+                {!limits.scheduledScans && (
+                  <UpgradeBanner currentPlan={planTier} feature="Scheduled scans" />
+                )}
 
                 <Checkbox
-                  label="Enable AI text analysis (Claude)"
+                  label={
+                    limits.aiTextAnalysis
+                      ? "Enable AI text analysis (Claude)"
+                      : "Enable AI text analysis (Claude) — Requires Pro plan"
+                  }
                   helpText="Uses Claude to detect nuanced claims that keyword rules might miss."
-                  checked={settings.aiTextAnalysis}
+                  checked={limits.aiTextAnalysis && settings.aiTextAnalysis}
+                  disabled={!limits.aiTextAnalysis}
                   onChange={(v) => updateSettings({ aiTextAnalysis: v })}
                 />
 
                 <Checkbox
-                  label="Enable image scanning (Claude Vision)"
+                  label={
+                    limits.imageScanning
+                      ? "Enable image scanning (Claude Vision)"
+                      : "Enable image scanning (Claude Vision) — Requires Pro plan"
+                  }
                   helpText="Analyzes product images for label compliance, claims on packaging, and label-vs-listing discrepancies."
-                  checked={settings.imageScanning}
+                  checked={limits.imageScanning && settings.imageScanning}
+                  disabled={!limits.imageScanning}
                   onChange={(v) => updateSettings({ imageScanning: v })}
                 />
+                {!limits.aiTextAnalysis && (
+                  <UpgradeBanner currentPlan={planTier} feature="AI analysis features" />
+                )}
               </FormLayout>
             </BlockStack>
           </Card>
@@ -291,9 +354,14 @@ export default function SettingsPage() {
               />
 
               <Checkbox
-                label="Enable storefront compliance badge"
+                label={
+                  limits.storefrontBadge
+                    ? "Enable storefront compliance badge"
+                    : "Enable storefront compliance badge — Requires Pro plan"
+                }
                 helpText="Display a compliance badge on product pages for compliant products."
-                checked={settings.storefrontBadgeEnabled}
+                checked={limits.storefrontBadge && settings.storefrontBadgeEnabled}
+                disabled={!limits.storefrontBadge}
                 onChange={(v) => updateSettings({ storefrontBadgeEnabled: v })}
               />
             </FormLayout>
@@ -308,22 +376,21 @@ export default function SettingsPage() {
           <Card>
             <FormLayout>
               <TextField
-                label="Anthropic API key"
-                helpText="Required for AI text analysis and image scanning features."
-                value={settings.anthropicApiKey || ""}
-                onChange={(v) => updateSettings({ anthropicApiKey: v })}
-                type="password"
-                autoComplete="off"
-              />
-
-              <TextField
-                label="External webhook URL"
+                label={
+                  limits.externalWebhook
+                    ? "External webhook URL"
+                    : "External webhook URL — Requires Pro plan"
+                }
                 helpText="Receive POST notifications when critical compliance issues are found."
                 value={settings.externalWebhookUrl || ""}
                 onChange={(v) => updateSettings({ externalWebhookUrl: v })}
                 type="url"
                 autoComplete="off"
+                disabled={!limits.externalWebhook}
               />
+              {!limits.externalWebhook && (
+                <UpgradeBanner currentPlan={planTier} feature="External webhooks" />
+              )}
             </FormLayout>
           </Card>
         </Layout.AnnotatedSection>

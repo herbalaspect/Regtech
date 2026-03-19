@@ -66,6 +66,11 @@ async function processWebhook(
       break;
     }
 
+    case "products/delete": {
+      await handleProductDelete(shopDomain, payload);
+      break;
+    }
+
     case "app/uninstalled": {
       await handleAppUninstalled(shopDomain);
       break;
@@ -132,7 +137,8 @@ async function handleProductChange(
     return;
   }
 
-  const scanResult = await scanProduct(productData, settings);
+  const planTier = (dbShop.plan || "compliance") as "compliance" | "compliance_pro" | "enterprise";
+  const scanResult = await scanProduct(productData, settings, undefined, planTier);
 
   await saveScanResult(
     dbShop.id,
@@ -166,6 +172,25 @@ async function handleProductChange(
       criticalCount: scanResult.findings.filter((f) => f.severity === "critical").length,
     });
   }
+}
+
+async function handleProductDelete(
+  shopDomain: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const dbShop = await getShopByDomain(shopDomain);
+  if (!dbShop) return;
+
+  const productNumericId = payload.id as number;
+  const shopifyGid = `gid://shopify/Product/${productNumericId}`;
+
+  // Soft-delete the product
+  await db.product.updateMany({
+    where: { shopId: dbShop.id, shopifyId: shopifyGid },
+    data: { deletedAt: new Date() },
+  });
+
+  console.log(`[Webhook] Soft-deleted product ${shopifyGid} for ${shopDomain}`);
 }
 
 async function handleAppUninstalled(shopDomain: string): Promise<void> {
