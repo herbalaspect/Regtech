@@ -29,6 +29,10 @@ const shopify = shopifyApp({
       deliveryMethod: "http" as const,
       callbackUrl: "/webhooks",
     },
+    PRODUCTS_DELETE: {
+      deliveryMethod: "http" as const,
+      callbackUrl: "/webhooks",
+    },
   },
   hooks: {
     afterAuth: async ({ session }) => {

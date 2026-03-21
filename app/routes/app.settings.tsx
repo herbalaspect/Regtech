@@ -20,6 +20,7 @@ import { db } from "~/lib/db.server";
 import { getShopByDomain } from "~/services/db/scan-writer";
 import { DEFAULT_SHOP_SETTINGS, PLAN_LIMITS, type PlanTier, type ShopSettings } from "~/lib/types";
 import { UpgradeBanner } from "~/components/UpgradeBanner";
+import { validateShopSettings } from "~/lib/validators";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
@@ -46,29 +47,23 @@ export async function action({ request }: ActionFunctionArgs) {
   const settingsJson = formData.get("settings") as string;
 
   try {
-    const parsed = JSON.parse(settingsJson) as Partial<ShopSettings>;
-
-    // Validate required fields
-    if (parsed.notificationEmails) {
-      const validEmails = parsed.notificationEmails.filter(
-        (e) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e),
-      );
-      parsed.notificationEmails = validEmails;
-    }
-
-    if (parsed.externalWebhookUrl && parsed.externalWebhookUrl.length > 0) {
-      try {
-        new URL(parsed.externalWebhookUrl);
-      } catch {
-        return json({ success: false, error: "Invalid webhook URL" }, { status: 400 });
-      }
-    }
-
+    const parsed = JSON.parse(settingsJson);
     const merged = { ...DEFAULT_SHOP_SETTINGS, ...parsed };
+
+    // Validate with Zod schema
+    const validation = validateShopSettings(merged);
+
+    if (!validation.success) {
+      const firstError = Object.entries(validation.errors)[0];
+      return json(
+        { success: false, error: `${firstError[0]}: ${firstError[1]}`, fieldErrors: validation.errors },
+        { status: 400 },
+      );
+    }
 
     await db.shop.update({
       where: { id: shop.id },
-      data: { settings: JSON.stringify(merged) },
+      data: { settings: JSON.stringify(validation.data) },
     });
 
     return json({ success: true });

@@ -207,14 +207,14 @@ async function handleAppUninstalled(shopDomain: string): Promise<void> {
  */
 function makeAdminFetch(shop: string, accessToken: string) {
   return {
-    graphql: async (query: string): Promise<Response> => {
+    graphql: async (query: string, options?: { variables?: Record<string, unknown> }): Promise<Response> => {
       return fetch(`https://${shop}/admin/api/2024-10/graphql.json`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "X-Shopify-Access-Token": accessToken,
         },
-        body: JSON.stringify({ query }),
+        body: JSON.stringify({ query, variables: options?.variables }),
       });
     },
   };
