@@ -35,6 +35,7 @@ model Shop {
   updatedAt     DateTime  @updatedAt
   products      Product[]
   scans         Scan[]
+  stateAlerts   StateComplianceAlert[]
 }
 
 model Product {
@@ -59,6 +60,7 @@ model Product {
   shop            Shop         @relation(fields: [shopId], references: [id], onDelete: Cascade)
   findings        Finding[]
   scans           Scan[]
+  coaDocuments    CoaDocument[]
 
   @@unique([shopId, shopifyId])
   @@index([shopId])
@@ -139,4 +141,142 @@ model AuditLog {
 
   @@index([shopId])
   @@index([createdAt])
+}
+
+// ── State-Level Cannabis Regulation Models ─────────────────────────
+
+model StateRegulation {
+  id                String   @id @default(cuid())
+  stateCode         String   // US state abbreviation (e.g. "CA", "CO")
+  stateName         String
+  cannabisLegal     Boolean  @default(false)
+  hempLegal         Boolean  @default(true)
+  medicalOnly       Boolean  @default(false)
+
+  // THC limits
+  deltaThcLimitPct  Float?   // Delta-9 THC limit (% by dry weight), null = banned
+  totalThcLimitPct  Float?   // Total THC limit (%) if applicable
+  thcMgPerServing   Float?   // Max THC mg per serving for edibles
+  thcMgPerPackage   Float?   // Max THC mg per package for edibles
+
+  // Cannabinoid restrictions (JSON array of banned cannabinoid names)
+  bannedCannabinoids String  @default("[]")
+  // Restricted cannabinoids with conditions (JSON)
+  restrictedCannabinoids String @default("[]")
+
+  // Labeling requirements (JSON array of required label elements)
+  labelingRequirements String @default("[]")
+  // Packaging rules (JSON)
+  packagingRules      String @default("{}")
+
+  // Licensing
+  requiresLicense     Boolean @default(false)
+  licenseTypes        String  @default("[]") // JSON array
+  licenseUrl          String?
+
+  // Age restrictions
+  minAge              Int     @default(21)
+
+  // Advertising restrictions (JSON)
+  advertisingRules    String  @default("[]")
+  // Platform-specific ad restrictions (JSON)
+  platformAdRules     String  @default("{}")
+
+  // Shipping
+  allowsInboundShipping  Boolean @default(true)
+  allowsOutboundShipping Boolean @default(true)
+  shippingNotes          String?
+
+  // Effective dates & versioning
+  effectiveDate     DateTime
+  expiresAt         DateTime?
+  sourceUrl         String?
+  sourceDescription String?
+  version           Int      @default(1)
+  isActive          Boolean  @default(true)
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([stateCode, version])
+  @@index([stateCode])
+  @@index([isActive])
+}
+
+model RegulationChangeLog {
+  id            String   @id @default(cuid())
+  stateCode     String
+  changeType    String   // "new", "amended", "repealed", "effective_date"
+  fieldChanged  String   // which field changed
+  previousValue String?
+  newValue      String?
+  summary       String   // human-readable change summary
+  effectiveDate DateTime
+  sourceUrl     String?
+  notifiedAt    DateTime?
+  createdAt     DateTime @default(now())
+
+  @@index([stateCode])
+  @@index([createdAt])
+  @@index([effectiveDate])
+}
+
+model CoaDocument {
+  id           String   @id @default(cuid())
+  shopId       String
+  productId    String?
+  fileName     String
+  fileUrl      String?
+  fileHash     String?
+
+  // Parsed COA data
+  labName      String?
+  labLicense   String?
+  testDate     DateTime?
+  batchNumber  String?
+  sampleName   String?
+
+  // Cannabinoid results (JSON: { "delta9_thc": 0.28, "cbd": 15.2, ... })
+  cannabinoidResults String @default("{}")
+  // Terpene results (JSON)
+  terpeneResults     String @default("{}")
+  // Contaminant results (JSON: { "pesticides": "pass", "heavy_metals": "pass", ... })
+  contaminantResults String @default("{}")
+
+  // Compliance status per state (JSON: { "CA": { "compliant": true }, "TX": { "compliant": false, "issues": [...] } })
+  stateCompliance    String @default("{}")
+
+  totalThcPct   Float?
+  totalCbdPct   Float?
+  moisturePct   Float?
+
+  isValid       Boolean  @default(true)
+  parsedAt      DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  product       Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([shopId])
+  @@index([productId])
+}
+
+model StateComplianceAlert {
+  id          String   @id @default(cuid())
+  shopId      String
+  stateCode   String
+  alertType   String   // "regulation_change", "thc_limit_change", "new_ban", "license_required"
+  severity    String   // "critical", "warning", "info"
+  title       String
+  description String
+  actionUrl   String?
+  dismissed   Boolean  @default(false)
+  readAt      DateTime?
+  createdAt   DateTime @default(now())
+
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+
+  @@index([shopId])
+  @@index([shopId, dismissed])
+  @@index([stateCode])
 }
