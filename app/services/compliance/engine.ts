@@ -13,6 +13,8 @@ import { runRules } from "./rule-runner";
 import { analyzeClaimsWithAI } from "./ai-analyzer";
 import { analyzeProductImages } from "./image-analyzer";
 import { getAllRulesForCategory } from "./rules/index";
+import { checkProductStateCompliance } from "../state-regulations/state-compliance-engine";
+import { STATE_REGULATION_MAP } from "../state-regulations/seed-data";
 
 /**
  * Main scan orchestrator. Runs the full compliance pipeline on a product.
@@ -59,14 +61,44 @@ export async function scanProduct(
       : Promise.resolve([] as ComplianceFinding[]),
   ]);
 
-  // Step 6: Merge and deduplicate findings
+  // Step 6: Run state compliance checks for hemp/CBD products
+  const stateFindings: ComplianceFinding[] = [];
+  if (settings.stateComplianceEnabled && (category === "hemp_cbd" || category === "supplement" || category === "essential_oil")) {
+    const targetStates = settings.targetStates.length > 0
+      ? settings.targetStates
+      : Object.keys(STATE_REGULATION_MAP);
+
+    for (const stateCode of targetStates) {
+      const regulation = STATE_REGULATION_MAP[stateCode];
+      if (!regulation) continue;
+      const stateResult = checkProductStateCompliance(product, stateCode, regulation);
+      // Only include critical state issues as findings to avoid noise
+      for (const issue of stateResult.issues) {
+        if (issue.severity === "critical") {
+          stateFindings.push({
+            ruleId: issue.ruleId,
+            category,
+            severity: issue.severity,
+            title: `[${stateCode}] ${issue.title}`,
+            description: issue.description,
+            affectedText: issue.affectedValue,
+            suggestion: issue.suggestion,
+            source: "rule_engine",
+          });
+        }
+      }
+    }
+  }
+
+  // Step 7: Merge and deduplicate findings
   const allFindings = deduplicateFindings([
     ...ruleFindings,
     ...aiFindings,
     ...imageFindings,
+    ...stateFindings,
   ]);
 
-  // Step 7: Calculate compliance score
+  // Step 8: Calculate compliance score
   const complianceScore = calculateScore(allFindings);
 
   return {

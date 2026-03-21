@@ -41,6 +41,9 @@ export const ShopSettingsSchema = z.object({
     .optional()
     .or(z.literal("")),
   storefrontBadgeEnabled: z.boolean(),
+
+  stateComplianceEnabled: z.boolean(),
+  targetStates: z.array(z.string().length(2, "State code must be 2 characters")),
 });
 
 export type ValidatedShopSettings = z.infer<typeof ShopSettingsSchema>;

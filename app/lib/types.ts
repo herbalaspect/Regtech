@@ -188,6 +188,10 @@ export interface ShopSettings {
   // External integrations
   externalWebhookUrl?: string;
   storefrontBadgeEnabled: boolean;
+
+  // State compliance
+  stateComplianceEnabled: boolean;
+  targetStates: string[]; // US state codes to check against
 }
 
 export const DEFAULT_SHOP_SETTINGS: ShopSettings = {
@@ -208,6 +212,8 @@ export const DEFAULT_SHOP_SETTINGS: ShopSettings = {
   digestFrequency: "weekly",
   retentionDays: 90,
   storefrontBadgeEnabled: false,
+  stateComplianceEnabled: false,
+  targetStates: [], // empty = all states; enable stateComplianceEnabled to activate
 };
 
 // ── Extended Scan Result (with plan limit info) ───────────────────
